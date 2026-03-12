@@ -1,125 +1,114 @@
 import logging
-import subprocess
 import os
-import signal
-import time
 import shutil
-from typing import Dict, Optional
+import signal
+import subprocess
 
-logging.basicConfig(level=logging.INFO)
+from config import hls_config
+
 logger = logging.getLogger(__name__)
 
-HLS_BASE_DIR = os.getenv("HLS_DIR", "/app/hls")
 
-def start_hls_worker(camera_id: str, url: str):
-    """
-    Launch a GStreamer process to generate HLS segments.
-    """
-    output_dir = os.path.join(HLS_BASE_DIR, camera_id)
-    os.makedirs(output_dir, exist_ok=True)
-    
+def _build_pipeline(camera_id: str, url: str) -> list[str]:
+    output_dir = os.path.join(hls_config.base_dir, camera_id)
     playlist_path = os.path.join(output_dir, "playlist.m3u8")
     segment_path = os.path.join(output_dir, "segment_%05d.ts")
 
-    # Use rtspsrc for RTSP for better reliability, otherwise stick to uridecodebin
     if url.startswith("rtsp://"):
-        source_bin = ["rtspsrc", f"location={url}", "protocols=tcp", "!", "rtph264depay", "!", "h264parse", "!", "avdec_h264"]
+        source = [
+            "rtspsrc", f"location={url}", "protocols=tcp",
+            "!", "rtph264depay", "!", "h264parse", "!", "avdec_h264",
+        ]
     else:
-        source_bin = ["uridecodebin", f"uri={url}"]
+        source = ["uridecodebin", f"uri={url}"]
 
-    pipeline = [
-        "gst-launch-1.0",
-        "-v",
-    ] + source_bin + [
-        "!",
-        "videoconvert", "!",
-        "videoscale", "!",
-        "video/x-raw,width=1920,height=1080", "!",
-        "videoconvert", "!",
-        "x264enc", "tune=zerolatency", "bitrate=4000", "speed-preset=ultrafast", "key-int-max=60", "!",
-        "h264parse", "!",
-        "mpegtsmux", "!",
-        "hlssink",
+    return [
+        "gst-launch-1.0", "-v",
+        *source,
+        "!", "videoconvert",
+        "!", "videoscale",
+        "!", f"video/x-raw,width={hls_config.video_width},height={hls_config.video_height}",
+        "!", "videoconvert",
+        "!", "x264enc", "tune=zerolatency", f"bitrate={hls_config.bitrate}", "speed-preset=ultrafast", "key-int-max=60",
+        "!", "h264parse",
+        "!", "mpegtsmux",
+        "!", "hlssink",
         f"location={segment_path}",
         f"playlist-location={playlist_path}",
-        "target-duration=2",
-        "max-files=10",
-        "playlist-length=5"
+        f"target-duration={hls_config.target_duration}",
+        f"max-files={hls_config.max_files}",
+        f"playlist-length={hls_config.playlist_length}",
     ]
 
-    logger.info(f"Starting HLS worker for {camera_id}: {' '.join(pipeline)}")
-    
-    try:
-        process = subprocess.Popen(
-            pipeline,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.PIPE,
-            preexec_fn=os.setsid
-        )
-        return process
-    except Exception as e:
-        logger.error(f"Failed to start HLS process for {camera_id}: {e}")
-        return None
 
 class CameraStream:
-    def __init__(self, camera_id: str, url: str):
+    def __init__(self, camera_id: str, url: str) -> None:
         self.camera_id = camera_id
         self.url = url
-        self.process: Optional[subprocess.Popen] = None
+        self.process: subprocess.Popen | None = None
 
-    def start(self):
+    @property
+    def _output_dir(self) -> str:
+        return os.path.join(hls_config.base_dir, self.camera_id)
+
+    def start(self) -> None:
         if self.process and self.process.poll() is None:
             return
-        
-        # Ensure directory is clean
-        output_dir = os.path.join(HLS_BASE_DIR, self.camera_id)
-        if os.path.exists(output_dir):
-            shutil.rmtree(output_dir)
-        
-        self.process = start_hls_worker(self.camera_id, self.url)
 
-    def stop(self):
+        if os.path.exists(self._output_dir):
+            shutil.rmtree(self._output_dir)
+        os.makedirs(self._output_dir, exist_ok=True)
+
+        pipeline = _build_pipeline(self.camera_id, self.url)
+        logger.info("Starting HLS worker for %s: %s", self.camera_id, " ".join(pipeline))
+
+        try:
+            self.process = subprocess.Popen(
+                pipeline,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
+                preexec_fn=os.setsid,
+            )
+        except Exception:
+            logger.exception("Failed to start HLS process for %s", self.camera_id)
+
+    def stop(self) -> None:
         if self.process:
             try:
                 os.killpg(os.getpgid(self.process.pid), signal.SIGTERM)
                 self.process.wait(timeout=5)
-            except Exception as e:
-                logger.warning(f"Error stopping process for {self.camera_id}: {e}")
+            except Exception:
+                logger.warning("Error stopping process for %s, sending SIGKILL", self.camera_id)
                 if self.process.poll() is None:
                     os.killpg(os.getpgid(self.process.pid), signal.SIGKILL)
-            
             self.process = None
-        
-        # Cleanup files
-        output_dir = os.path.join(HLS_BASE_DIR, self.camera_id)
-        if os.path.exists(output_dir):
-            try:
-                shutil.rmtree(output_dir)
-            except:
-                pass
+
+        if os.path.exists(self._output_dir):
+            shutil.rmtree(self._output_dir, ignore_errors=True)
+
 
 class StreamManager:
-    def __init__(self):
-        self.streams: Dict[str, CameraStream] = {}
-        # Ensure base directory exists
-        os.makedirs(HLS_BASE_DIR, exist_ok=True)
+    def __init__(self) -> None:
+        self.streams: dict[str, CameraStream] = {}
+        os.makedirs(hls_config.base_dir, exist_ok=True)
 
-    def add_camera(self, camera_id: str, url: str):
+    def add_camera(self, camera_id: str, url: str) -> None:
         if camera_id in self.streams:
             self.streams[camera_id].stop()
-        
+
         stream = CameraStream(camera_id, url)
         self.streams[camera_id] = stream
         stream.start()
 
-    def remove_camera(self, camera_id: str):
+    def remove_camera(self, camera_id: str) -> None:
         if camera_id in self.streams:
             self.streams[camera_id].stop()
             del self.streams[camera_id]
 
-    def stop_all(self):
+    def stop_all(self) -> None:
         for stream in self.streams.values():
             stream.stop()
         self.streams.clear()
+
 
 stream_manager = StreamManager()

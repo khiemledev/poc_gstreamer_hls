@@ -1,12 +1,26 @@
 import React, { useState, useEffect, useRef } from 'react';
 import axios from 'axios';
-import { Camera, Plus, Trash2, Video, Activity, Download, Upload, Maximize, Edit2, X } from 'lucide-react';
+import { Plus, Trash2, Video, Activity, Maximize, Edit2 } from 'lucide-react';
+import { toast } from 'sonner';
 
-const isLocal = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1';
+import { Button } from '@/components/ui/button';
+import { Input } from '@/components/ui/input';
+import { Label } from '@/components/ui/label';
+import {
+    Dialog,
+    DialogContent,
+    DialogDescription,
+    DialogFooter,
+    DialogHeader,
+    DialogTitle,
+    DialogTrigger,
+} from '@/components/ui/dialog';
+
 const subpath = window.location.pathname.startsWith('/vision_flow') ? '/vision_flow' : '';
-const API_BASE_URL = isLocal
-    ? 'http://localhost:8000/api'
-    : window.location.origin + subpath + '/api';
+const API_BASE_URL = import.meta.env.VITE_API_BASE_URL
+    || `${window.location.origin}${subpath}/api`;
+const HLS_BASE_URL = import.meta.env.VITE_HLS_BASE_URL
+    || `${window.location.origin}${subpath}`;
 
 const App = () => {
     const [cameras, setCameras] = useState([]);
@@ -14,7 +28,8 @@ const App = () => {
     const [url, setUrl] = useState('');
     const [loading, setLoading] = useState(false);
     const [editingCamera, setEditingCamera] = useState(null);
-    const fileInputRef = useRef(null);
+    const [dialogOpen, setDialogOpen] = useState(false);
+    const [deleteConfirmId, setDeleteConfirmId] = useState(null);
     const videoRefs = useRef({});
     const hlsInstances = useRef({});
     const [streamStatus, setStreamStatus] = useState({});
@@ -39,6 +54,7 @@ const App = () => {
             setCameras(response.data);
         } catch (error) {
             console.error('Error fetching cameras:', error);
+            toast.error('Failed to fetch cameras');
         }
     };
 
@@ -55,17 +71,13 @@ const App = () => {
             hlsInstances.current[cam.id].destroy();
         }
 
-        const hlsUrl = isLocal
-            ? `http://localhost:8081/${cam.hls_url}`
-            : `${window.location.origin}${subpath}/${cam.hls_url}`;
+        const hlsUrl = `${HLS_BASE_URL}/${cam.hls_url}`;
 
-        // Check if playlist exists before attaching
         try {
             await axios.head(hlsUrl);
             setStreamStatus(prev => ({ ...prev, [cam.id]: 'ready' }));
         } catch (error) {
             if (retryCount < 60) {
-                console.log(`Stream not ready for ${cam.id}, retrying... (${retryCount})`);
                 setStreamStatus(prev => ({ ...prev, [cam.id]: 'loading' }));
                 setTimeout(() => setupHLS(cam, retryCount + 1), 1000);
                 return;
@@ -96,44 +108,51 @@ const App = () => {
     useEffect(() => {
         cameras.forEach(cam => {
             if (!hlsInstances.current[cam.id]) {
-                // Small delay to ensure Hls is loaded and DOM is ready
                 setTimeout(() => setupHLS(cam), 500);
             }
         });
     }, [cameras]);
 
-    const addCamera = async (e) => {
+    const openAddDialog = () => {
+        setEditingCamera(null);
+        setName('');
+        setUrl('');
+        setDialogOpen(true);
+    };
+
+    const openEditDialog = (cam) => {
+        setEditingCamera(cam);
+        setName(cam.name);
+        setUrl(cam.url);
+        setDialogOpen(true);
+    };
+
+    const handleSubmit = async (e) => {
         e.preventDefault();
-        if (!name || !url) return;
+        if (!name || !url) {
+            toast.warning('Please fill in both camera name and URL');
+            return;
+        }
         setLoading(true);
         try {
             if (editingCamera) {
                 await axios.put(`${API_BASE_URL}/cameras/${editingCamera.id}`, { name, url });
-                setEditingCamera(null);
+                toast.success(`Camera "${name}" updated successfully`);
             } else {
                 await axios.post(`${API_BASE_URL}/cameras`, { name, url });
+                toast.success(`Camera "${name}" added successfully`);
             }
             setName('');
             setUrl('');
+            setDialogOpen(false);
+            setEditingCamera(null);
             fetchCameras();
         } catch (error) {
             console.error('Error saving camera:', error);
+            toast.error('Failed to save camera. Please try again.');
         } finally {
             setLoading(false);
         }
-    };
-
-    const startEditing = (cam) => {
-        setEditingCamera(cam);
-        setName(cam.name);
-        setUrl(cam.url);
-        window.scrollTo({ top: 0, behavior: 'smooth' });
-    };
-
-    const cancelEditing = () => {
-        setEditingCamera(null);
-        setName('');
-        setUrl('');
     };
 
     const deleteCamera = async (id) => {
@@ -143,9 +162,13 @@ const App = () => {
                 hlsInstances.current[id].destroy();
                 delete hlsInstances.current[id];
             }
+            toast.success('Camera deleted successfully');
             fetchCameras();
         } catch (error) {
             console.error('Error deleting camera:', error);
+            toast.error('Failed to delete camera');
+        } finally {
+            setDeleteConfirmId(null);
         }
     };
 
@@ -156,9 +179,9 @@ const App = () => {
         if (!document.fullscreenElement) {
             if (el.requestFullscreen) {
                 el.requestFullscreen();
-            } else if (el.webkitRequestFullscreen) { /* Safari */
+            } else if (el.webkitRequestFullscreen) {
                 el.webkitRequestFullscreen();
-            } else if (el.msRequestFullscreen) { /* IE11 */
+            } else if (el.msRequestFullscreen) {
                 el.msRequestFullscreen();
             }
         } else {
@@ -168,181 +191,183 @@ const App = () => {
         }
     };
 
-    const exportCameras = async () => {
-        try {
-            const response = await axios.get(`${API_BASE_URL}/cameras/export`);
-            const dataStr = "data:text/json;charset=utf-8," + encodeURIComponent(JSON.stringify(response.data, null, 2));
-            const downloadAnchorNode = document.createElement('a');
-            downloadAnchorNode.setAttribute("href", dataStr);
-            downloadAnchorNode.setAttribute("download", "cameras_backup.json");
-            document.body.appendChild(downloadAnchorNode);
-            downloadAnchorNode.click();
-            downloadAnchorNode.remove();
-        } catch (error) {
-            console.error('Error exporting cameras:', error);
-        }
-    };
-
-    const handleImportClick = () => {
-        fileInputRef.current.click();
-    };
-
-    const importCameras = async (e) => {
-        const file = e.target.files[0];
-        if (!file) return;
-
-        const reader = new FileReader();
-        reader.onload = async (event) => {
-            try {
-                const json = JSON.parse(event.target.result);
-                await axios.post(`${API_BASE_URL}/cameras/import`, json);
-                fetchCameras();
-                alert('Cameras imported successfully!');
-            } catch (error) {
-                console.error('Error importing cameras:', error);
-                alert('Failed to import cameras. Ensure the JSON format is correct.');
-            }
-        };
-        reader.readAsText(file);
-        e.target.value = ''; // Reset input
-    };
-
     return (
-        <div className="app-container">
-            <header>
-                <h1>HLS GStreamer</h1>
-                <p>Enterprise Camera Management & HLS (Chunked) Streamer</p>
+        <div className="max-w-[1400px] mx-auto p-6">
+            {/* Header */}
+            <header className="text-center mb-10">
+                <h1 className="text-4xl font-bold bg-gradient-to-br from-indigo-400 to-purple-400 bg-clip-text text-transparent mb-2">
+                    HLS GStreamer
+                </h1>
+                <p className="text-muted-foreground">
+                    Just for POC
+                </p>
             </header>
 
-            <div className="dashboard">
-                <aside className="glass-card camera-form">
-                    <h2>
-                        {editingCamera ? <Edit2 size={20} /> : <Plus size={20} />}
-                        {editingCamera ? ' Edit Camera' : ' Add New Camera'}
-                    </h2>
-                    <form onSubmit={addCamera}>
-                        <div className="form-group">
-                            <label>Camera Name</label>
-                            <input
-                                type="text"
-                                placeholder="Entry Door 01"
-                                value={name}
-                                onChange={(e) => setName(e.target.value)}
-                            />
+            {/* Toolbar */}
+            <div className="flex items-center mb-6">
+                <Button onClick={openAddDialog}>
+                    <Plus className="h-4 w-4" />
+                    Add Camera
+                </Button>
+            </div>
+
+            {/* Add / Edit Camera Dialog */}
+            <Dialog open={dialogOpen} onOpenChange={setDialogOpen}>
+                <DialogContent className="sm:max-w-md">
+                    <DialogHeader>
+                        <DialogTitle className="flex items-center gap-2">
+                            {editingCamera ? <Edit2 className="h-5 w-5" /> : <Plus className="h-5 w-5" />}
+                            {editingCamera ? 'Edit Camera' : 'Add New Camera'}
+                        </DialogTitle>
+                        <DialogDescription>
+                            {editingCamera
+                                ? 'Update the camera details below.'
+                                : 'Enter the camera name and stream URL to get started.'}
+                        </DialogDescription>
+                    </DialogHeader>
+                    <form onSubmit={handleSubmit}>
+                        <div className="grid gap-4 py-4">
+                            <div className="grid gap-2">
+                                <Label htmlFor="camera-name">Camera Name</Label>
+                                <Input
+                                    id="camera-name"
+                                    placeholder="Entry Door 01"
+                                    value={name}
+                                    onChange={(e) => setName(e.target.value)}
+                                />
+                            </div>
+                            <div className="grid gap-2">
+                                <Label htmlFor="camera-url">RTSP / HTTP / HLS URL</Label>
+                                <Input
+                                    id="camera-url"
+                                    placeholder="rtsp://... or http://..."
+                                    value={url}
+                                    onChange={(e) => setUrl(e.target.value)}
+                                />
+                            </div>
                         </div>
-                        <div className="form-group">
-                            <label>RTSP / HTTP / HLS URL</label>
-                            <input
-                                type="text"
-                                placeholder="rtsp://... or http://..."
-                                value={url}
-                                onChange={(e) => setUrl(e.target.value)}
-                            />
-                        </div>
-                        <button className="btn btn-primary" type="submit" disabled={loading}>
-                            {loading ? 'Saving...' : (editingCamera ? 'Update Stream' : 'Initialize Stream')}
-                        </button>
-                        {editingCamera && (
-                            <button
-                                className="btn btn-secondary"
+                        <DialogFooter>
+                            <Button
                                 type="button"
-                                onClick={cancelEditing}
-                                style={{ marginTop: '0.5rem', width: '100%', backgroundColor: 'rgba(255,255,255,0.05)' }}
+                                variant="outline"
+                                onClick={() => setDialogOpen(false)}
                             >
-                                <X size={16} /> Cancel Edit
-                            </button>
-                        )}
+                                Cancel
+                            </Button>
+                            <Button type="submit" disabled={loading}>
+                                {loading ? 'Saving...' : (editingCamera ? 'Update Stream' : 'Initialize Stream')}
+                            </Button>
+                        </DialogFooter>
                     </form>
+                </DialogContent>
+            </Dialog>
 
-                    <div style={{ marginTop: '2rem', display: 'flex', flexDirection: 'column', gap: '1rem' }}>
-                        <div style={{ display: 'flex', gap: '0.5rem' }}>
-                            <button className="btn btn-secondary" onClick={exportCameras} style={{ flex: 1, backgroundColor: 'rgba(255,255,255,0.05)', color: 'white', border: '1px solid var(--glass-border)' }}>
-                                <Download size={16} /> Export
-                            </button>
-                            <button className="btn btn-secondary" onClick={handleImportClick} style={{ flex: 1, backgroundColor: 'rgba(255,255,255,0.05)', color: 'white', border: '1px solid var(--glass-border)' }}>
-                                <Upload size={16} /> Import
-                            </button>
-                            <input
-                                type="file"
-                                ref={fileInputRef}
-                                style={{ display: 'none' }}
-                                accept=".json"
-                                onChange={importCameras}
+            {/* Delete Confirmation Dialog */}
+            <Dialog open={deleteConfirmId !== null} onOpenChange={(open) => !open && setDeleteConfirmId(null)}>
+                <DialogContent className="sm:max-w-sm">
+                    <DialogHeader>
+                        <DialogTitle>Delete Camera</DialogTitle>
+                        <DialogDescription>
+                            Are you sure you want to delete this camera? This action cannot be undone.
+                        </DialogDescription>
+                    </DialogHeader>
+                    <DialogFooter>
+                        <Button variant="outline" onClick={() => setDeleteConfirmId(null)}>
+                            Cancel
+                        </Button>
+                        <Button variant="destructive" onClick={() => deleteCamera(deleteConfirmId)}>
+                            Delete
+                        </Button>
+                    </DialogFooter>
+                </DialogContent>
+            </Dialog>
+
+            {/* Camera Grid */}
+            <div className="grid grid-cols-[repeat(auto-fill,minmax(400px,1fr))] gap-4">
+                {cameras.map((cam) => (
+                    <div key={cam.id} className="rounded-xl border bg-card text-card-foreground overflow-hidden flex flex-col">
+                        <div
+                            className="relative aspect-video bg-black rounded-t-xl overflow-hidden group"
+                            ref={el => videoRefs.current[cam.id] = el}
+                        >
+                            <video
+                                autoPlay
+                                playsInline
+                                muted
+                                controls
+                                className="w-full h-full object-cover"
+                                style={{ display: streamStatus[cam.id] === 'ready' ? 'block' : 'none' }}
                             />
+                            {streamStatus[cam.id] !== 'ready' && (
+                                <div className="absolute inset-0 flex flex-col items-center justify-center bg-black/50 z-10">
+                                    <Activity
+                                        className="h-8 w-8 text-indigo-500 mb-3 animate-pulse-opacity"
+                                    />
+                                    <span className="text-sm text-muted-foreground">
+                                        {streamStatus[cam.id] === 'error' ? 'Stream Error' : 'Loading Stream...'}
+                                    </span>
+                                </div>
+                            )}
+                            <div className="absolute inset-0 bg-black/40 flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity pointer-events-none">
+                                <button
+                                    className="bg-indigo-500 hover:bg-indigo-600 text-white rounded-full w-12 h-12 flex items-center justify-center pointer-events-auto transition-transform hover:scale-110 cursor-pointer"
+                                    onClick={() => toggleFullScreen(cam.id)}
+                                >
+                                    <Maximize className="h-5 w-5" />
+                                </button>
+                            </div>
                         </div>
-
-                        <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', color: 'var(--text-muted)', fontSize: '0.875rem' }}>
-                            <Activity size={16} />
-                            <span>HLS Status: Active (Chunked)</span>
+                        <div className="flex items-center justify-between p-4">
+                            <div>
+                                <h3 className="font-semibold text-sm" title={cam.url}>{cam.name}</h3>
+                                <span className={`inline-flex items-center gap-1 mt-1 text-xs font-semibold px-2 py-0.5 rounded-md ${
+                                    streamStatus[cam.id] === 'ready'
+                                        ? 'bg-green-500/10 text-green-500'
+                                        : streamStatus[cam.id] === 'error'
+                                            ? 'bg-red-500/10 text-red-500'
+                                            : 'bg-yellow-500/10 text-yellow-500'
+                                }`}>
+                                    <span className={`inline-block h-1.5 w-1.5 rounded-full ${
+                                        streamStatus[cam.id] === 'ready'
+                                            ? 'bg-green-500'
+                                            : streamStatus[cam.id] === 'error'
+                                                ? 'bg-red-500'
+                                                : 'bg-yellow-500 animate-pulse'
+                                    }`} />
+                                    {streamStatus[cam.id] === 'ready' ? 'LIVE' : streamStatus[cam.id] === 'error' ? 'ERROR' : 'CONNECTING'}
+                                </span>
+                            </div>
+                            <div className="flex gap-1.5">
+                                <Button
+                                    variant="ghost"
+                                    size="icon"
+                                    className="h-8 w-8"
+                                    onClick={() => openEditDialog(cam)}
+                                >
+                                    <Edit2 className="h-4 w-4" />
+                                </Button>
+                                <Button
+                                    variant="ghost"
+                                    size="icon"
+                                    className="h-8 w-8 text-destructive hover:text-destructive"
+                                    onClick={() => setDeleteConfirmId(cam.id)}
+                                >
+                                    <Trash2 className="h-4 w-4" />
+                                </Button>
+                            </div>
                         </div>
                     </div>
-                </aside>
+                ))}
 
-                <main className="camera-grid">
-                    {cameras.map((cam) => (
-                        <div key={cam.id} className="glass-card camera-card">
-                            <div
-                                className="video-container"
-                                ref={el => videoRefs.current[cam.id] = el}
-                            >
-                                <video
-                                    autoPlay
-                                    playsInline
-                                    muted
-                                    controls
-                                    style={{ width: '100%', height: '100%', objectFit: 'cover', display: streamStatus[cam.id] === 'ready' ? 'block' : 'none' }}
-                                />
-                                {streamStatus[cam.id] !== 'ready' && (
-                                    <div className="loading-overlay" style={{
-                                        position: 'absolute',
-                                        top: 0, left: 0, right: 0, bottom: 0,
-                                        display: 'flex', flexDirection: 'column',
-                                        alignItems: 'center', justifyContent: 'center',
-                                        background: 'rgba(0,0,0,0.5)', zIndex: 5
-                                    }}>
-                                        <Activity className="animate-pulse" size={32} style={{ color: 'var(--primary)', marginBottom: '1rem' }} />
-                                        <span>{streamStatus[cam.id] === 'error' ? 'Stream Error' : 'Loading Stream...'}</span>
-                                    </div>
-                                )}
-                                <div className="video-controls">
-                                    <button className="fullscreen-btn" onClick={() => toggleFullScreen(cam.id)}>
-                                        <Maximize size={24} />
-                                    </button>
-                                </div>
-                            </div>
-                            <div className="camera-info">
-                                <div>
-                                    <h3 title={cam.url}>{cam.name}</h3>
-                                    <span className="badge">LIVE (CHUNKED)</span>
-                                </div>
-                                <div style={{ display: 'flex', gap: '0.5rem' }}>
-                                    <button
-                                        className="btn btn-secondary"
-                                        style={{ width: 'auto', padding: '0.5rem', backgroundColor: 'rgba(255,255,255,0.05)' }}
-                                        onClick={() => startEditing(cam)}
-                                    >
-                                        <Edit2 size={18} />
-                                    </button>
-                                    <button
-                                        className="btn btn-danger"
-                                        style={{ width: 'auto', padding: '0.5rem' }}
-                                        onClick={() => deleteCamera(cam.id)}
-                                    >
-                                        <Trash2 size={18} />
-                                    </button>
-                                </div>
-                            </div>
-                        </div>
-                    ))}
-
-                    {cameras.length === 0 && (
-                        <div className="glass-card" style={{ gridColumn: '1/-1', textAlign: 'center', padding: '4rem' }}>
-                            <Video size={48} style={{ color: 'var(--text-muted)', marginBottom: '1rem' }} />
-                            <h3>No Cameras Connected</h3>
-                            <p style={{ color: 'var(--text-muted)' }}>Add your first RTSP, HTTP, or HLS stream to get started.</p>
-                        </div>
-                    )}
-                </main>
+                {cameras.length === 0 && (
+                    <div className="col-span-full rounded-xl border bg-card text-card-foreground text-center py-16 px-6">
+                        <Video className="h-12 w-12 text-muted-foreground mx-auto mb-4" />
+                        <h3 className="text-lg font-semibold mb-1">No Cameras Connected</h3>
+                        <p className="text-muted-foreground text-sm">
+                            Click "Add Camera" to add your first RTSP, HTTP, or HLS stream.
+                        </p>
+                    </div>
+                )}
             </div>
         </div>
     );
