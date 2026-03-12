@@ -1,0 +1,7 @@
+fastapi==0.109.2
+uvicorn==0.27.1
+# opencv-python-headless==4.9.0.80 (Using system python3-opencv instead for GStreamer support)
+numpy==1.26.4
+python-multipart==0.0.9
+pydantic==2.6.1
+aiortc==1.8.0
